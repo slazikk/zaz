@@ -105,7 +105,20 @@ struct LibraryView: View {
 
 struct SettingsView: View {
     @EnvironmentObject private var session: SessionStore
-    var body: some View { NavigationStack { Form { Section("Аккаунт") { Text("Токен хранится в Keychain устройства").font(.footnote); Button("Выйти", role: .destructive) { session.signOut() } } Section("О приложении") { Text("Неофициальный клиент для сервиса Звук.").font(.footnote) } }.navigationTitle("Настройки") } }
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Аккаунт") {
+                    Text("Токен хранится в Keychain устройства").font(.footnote)
+                    Button("Выйти", role: .destructive) { session.signOut() }
+                }
+                Section("О приложении") {
+                    Text("Неофициальный клиент для сервиса Звук.").font(.footnote)
+                }
+            }
+            .navigationTitle("Настройки")
+        }
+    }
 }
 
 struct MiniPlayer: View {
