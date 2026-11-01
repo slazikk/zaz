@@ -32,7 +32,7 @@ actor ZvukAPI {
     }
 
     func quickSearch(_ text: String) async throws -> [SearchItem] {
-        let query = """query quickSearch($query: String!, $limit: Int!) { quickSearch(query: $query, limit: $limit) { content { __typename ... on Track { id title duration artists { id title image { src } } release { id title date image { src } artists { id title image { src } } } } ... on Artist { id title image { src } } ... on Release { id title date image { src } artists { id title image { src } } } ... on Playlist { id title description duration image { src } } } } }"""
+        let query = "query quickSearch(($query: String!, $limit: Int!) { quickSearch(query: $query, limit: $limit) { content { __typename ... on Track { id title duration artists { id title image { src } } release { id title date image { src } artists { id title image { src } } } } ... on Artist { id title image { src } } ... on Release { id title date image { src } artists { id title image { src } } } ... on Playlist { id title description duration image { src } } } } }"
         let data = try await request(query, operation: "quickSearch", variables: ["query": text, "limit": 30])
         let content = ((data["quickSearch"] as? [String: Any])?["content"] as? [[String: Any]]) ?? []
         return try content.compactMap { raw in
