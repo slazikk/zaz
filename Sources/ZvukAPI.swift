@@ -66,6 +66,14 @@ actor ZvukAPI {
         }
     }
 
+    /// «Поток» — серверная персональная волна Звука, а не локальная очередь.
+    func personalWave() async throws -> [Track] {
+        let query = "query getPersonalWave($first: PositiveInt!, $options: PersonalWaveOptions, $waveSrc: MagicSource) { personalWaveContent(first: $first, options: $options, waveSrc: $waveSrc) { id title duration artists { id title image { src } } release { id title date image { src } artists { id title image { src } } } } }"
+        let data = try await request(query, operation: "getPersonalWave", variables: ["first": 25, "waveSrc": "AMAZME", "options": ["mood": "energy:0.5,fun:0.5"]])
+        let rows = data["personalWaveContent"] as? [[String: Any]] ?? []
+        return try rows.map { try JSONDecoder().decode(Track.self, from: JSONSerialization.data(withJSONObject: $0)) }
+    }
+
     func streamURL(for trackID: String) async throws -> URL {
         let query = "query getStream($ids: [ID!]!) { mediaContents(ids: $ids) { ... on Track { stream { flac high mid } } } }"
         let data = try await request(query, operation: "getStream", variables: ["ids": [trackID]])
