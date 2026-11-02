@@ -1,118 +1,178 @@
-import Foundation
+import SwiftUI
 
-enum APIError: LocalizedError {
-    case invalidResponse, graphql(String)
-    var errorDescription: String? { switch self { case .invalidResponse: "Сервис вернул некорректный ответ"; case .graphql(let text): text } }
+struct TokenSignInView: View {
+    @EnvironmentObject private var session: SessionStore
+    @State private var token = ""
+    @State private var working = false
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 22) {
+                Image(systemName: "waveform.circle.fill").font(.system(size: 72)).foregroundStyle(.orange)
+                Text("Zvuk Music").font(.largeTitle.bold())
+                Text("Неофициальный клиент. Нужна активная подписка «Звук».").multilineTextAlignment(.center).foregroundStyle(.secondary)
+                SecureField("X-Auth-Token", text: $token).textInputAutocapitalization(.never).autocorrectionDisabled().textFieldStyle(.roundedBorder)
+                if let error = session.error { Text(error).font(.footnote).foregroundStyle(.red).multilineTextAlignment(.center) }
+                Button(working ? "Проверяем…" : "Войти") { working = true; Task { await session.signIn(token: token.trimmingCharacters(in: .whitespacesAndNewlines)); working = false } }
+                    .buttonStyle(.borderedProminent).disabled(token.isEmpty || working)
+                Text("Откройте zvuk.com/api/tiny/profile в браузере после входа и скопируйте поле token.").font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            }.padding(28).navigationTitle("Авторизация")
+        }
+    }
 }
 
-actor ZvukAPI {
-    static let shared = ZvukAPI()
-    private let endpoint = URL(string: "https://zvuk.com/api/v1/graphql")!
-    private let profileEndpoint = URL(string: "https://zvuk.com/api/tiny/profile")!
-    private var token: String?
-    func configure(token: String?) { self.token = token }
-
-    private func applyHeaders(to request: inout URLRequest) {
-        request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
-        request.setValue("ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7", forHTTPHeaderField: "Accept-Language")
-        request.setValue("https://zvuk.com/", forHTTPHeaderField: "Referer")
-        request.setValue("https://zvuk.com", forHTTPHeaderField: "Origin")
-        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
-        if let token { request.setValue(token, forHTTPHeaderField: "X-Auth-Token") }
+struct MainTabs: View {
+    var body: some View {
+        TabView {
+            FlowView().tabItem { Label("Поток", systemImage: "sparkles") }
+            SearchView().tabItem { Label("Поиск", systemImage: "magnifyingglass") }
+            LibraryView().tabItem { Label("Медиатека", systemImage: "books.vertical") }
+            SettingsView().tabItem { Label("Настройки", systemImage: "gearshape") }
+        }.safeAreaInset(edge: .bottom) { MiniPlayer() }
     }
+}
 
-    private func request(_ query: String, operation: String, variables: [String: Any] = [:]) async throws -> [String: Any] {
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        applyHeaders(to: &request)
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["operationName": operation, "query": query, "variables": variables])
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode,
-              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw APIError.invalidResponse }
-        if let errors = root["errors"] as? [[String: Any]], let message = errors.first?["message"] as? String { throw APIError.graphql(message) }
-        guard let result = root["data"] as? [String: Any] else { throw APIError.invalidResponse }
-        return result
-    }
+struct FlowView: View {
+    @EnvironmentObject private var player: PlayerStore
+    @State private var tracks: [Track] = []
+    @State private var loading = false
+    @State private var error: String?
 
-    func verifyToken(_ value: String) async throws {
-        configure(token: value)
-        var request = URLRequest(url: profileEndpoint)
-        request.httpMethod = "GET"
-        applyHeaders(to: &request)
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode,
-              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              root["result"] != nil else {
-            configure(token: nil)
-            throw APIError.graphql("Не удалось проверить токен. Откройте zvuk.com/api/tiny/profile в браузере и скопируйте значение поля token.")
-        }
-    }
-
-    func quickSearch(_ text: String) async throws -> [SearchItem] {
-        let query = "query quickSearch($query: String!, $limit: Int!) { quickSearch(query: $query, limit: $limit) { content { __typename ... on Track { id title duration artists { id title image { src } } release { id title date image { src } artists { id title image { src } } } } ... on Artist { id title image { src } } ... on Release { id title date image { src } artists { id title image { src } } } ... on Playlist { id title description duration image { src } } } } }"
-        let data = try await request(query, operation: "quickSearch", variables: ["query": text, "limit": 30])
-        let content = ((data["quickSearch"] as? [String: Any])?["content"] as? [[String: Any]]) ?? []
-        return try content.compactMap { raw in
-            guard let kind = raw["__typename"] as? String else { return nil }
-            let json = try JSONSerialization.data(withJSONObject: raw)
-            switch kind {
-            case "Track": return .track(try JSONDecoder().decode(Track.self, from: json))
-            case "Artist": return .artist(try JSONDecoder().decode(Artist.self, from: json))
-            case "Release": return .release(try JSONDecoder().decode(Release.self, from: json))
-            case "Playlist": return .playlist(try JSONDecoder().decode(Playlist.self, from: json))
-            default: return nil
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: [.black, .purple.opacity(0.85), .orange.opacity(0.55)], startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    HStack { Text("Поток").font(.system(size: 38, weight: .bold)); Spacer(); Image(systemName: "wave.3.right.circle.fill").font(.system(size: 38)).foregroundStyle(.white.opacity(0.9)) }
+                    Text("Твоя персональная музыка\nпрямо сейчас").font(.title3.weight(.medium)).foregroundStyle(.white.opacity(0.8))
+                    Button { Task { await startFlow() } } label: {
+                        Label(loading ? "Собираем поток…" : "Запустить поток", systemImage: "play.fill")
+                            .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 17)
+                    }
+                    .buttonStyle(.borderedProminent).tint(.white).foregroundStyle(.black).disabled(loading)
+                    if let error { Text(error).font(.footnote).foregroundStyle(.white).padding().background(.red.opacity(0.35), in: RoundedRectangle(cornerRadius: 14)) }
+                    if !tracks.isEmpty {
+                        Text("В вашем потоке").font(.headline).foregroundStyle(.white)
+                        LazyVStack(spacing: 10) {
+                            ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
+                                Button { Task { await player.play(track, in: tracks) } } label: {
+                                    HStack(spacing: 12) { Text("\(index + 1)").font(.caption.monospacedDigit()).foregroundStyle(.white.opacity(0.6)).frame(width: 20); ArtworkView(url: track.artworkURL).frame(width: 52, height: 52); VStack(alignment: .leading, spacing: 3) { Text(track.title).lineLimit(1); Text(track.artistText).font(.subheadline).foregroundStyle(.white.opacity(0.65)).lineLimit(1) }; Spacer(); Image(systemName: "play.fill").font(.caption) }
+                                    .foregroundStyle(.white).padding(8).background(.white.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
+                                }.buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }.padding(.horizontal, 20).padding(.top, 30).padding(.bottom, 115)
             }
         }
+        .task { if tracks.isEmpty { await loadFlow() } }
     }
+    private func loadFlow() async { loading = true; error = nil; do { tracks = try await ZvukAPI.shared.personalWave() } catch { self.error = error.localizedDescription }; loading = false }
+    private func startFlow() async { if tracks.isEmpty { await loadFlow() }; if let first = tracks.first { await player.play(first, in: tracks) } }
+}
 
-    /// «Поток» — серверная персональная волна Звука, а не локальная очередь.
-    func personalWave() async throws -> [Track] {
-        let query = "query getPersonalWave($first: PositiveInt!, $options: PersonalWaveOptions, $waveSrc: MagicSource) { personalWaveContent(first: $first, options: $options, waveSrc: $waveSrc) { id title duration artists { id title image { src } } release { id title date image { src } artists { id title image { src } } } } }"
-        let data = try await request(query, operation: "getPersonalWave", variables: ["first": 25, "waveSrc": "AMAZME", "options": ["mood": "energy:0.5,fun:0.5"]])
-        let rows = data["personalWaveContent"] as? [[String: Any]] ?? []
-        return try rows.map { try JSONDecoder().decode(Track.self, from: JSONSerialization.data(withJSONObject: $0)) }
+struct SearchView: View {
+    @EnvironmentObject private var player: PlayerStore
+    @State private var text = ""
+    @State private var results: [SearchItem] = []
+    @State private var loading = false
+    @State private var error: String?
+    var body: some View {
+        NavigationStack {
+            List {
+                if loading { ProgressView().frame(maxWidth: .infinity) }
+                if let error { ContentUnavailableView("Не удалось выполнить поиск", systemImage: "wifi.exclamationmark", description: Text(error)) }
+                ForEach(results) { item in
+                    Button { if case let .track(track) = item { let queue = results.compactMap { if case let .track(value) = $0 { value } else { nil } }; Task { await player.play(track, in: queue) } } } label: { SearchRow(item: item) }.buttonStyle(.plain)
+                }
+            }.navigationTitle("Поиск")
+                .searchable(text: $text, prompt: "Трек, артист, альбом или плейлист")
+                .onChange(of: text) { _, value in scheduleSearch(value) }
+        }
     }
+    private func scheduleSearch(_ value: String) {
+        guard value.trimmingCharacters(in: .whitespaces).count > 1 else { results = []; return }
+        loading = true; error = nil
+        Task { try? await Task.sleep(for: .milliseconds(350)); guard text == value else { return }
+            do { results = try await ZvukAPI.shared.quickSearch(value) } catch { self.error = error.localizedDescription }; loading = false
+        }
+    }
+}
 
-    func streamURL(for trackID: String) async throws -> URL {
-        let query = "query getStream($ids: [ID!]!) { mediaContents(ids: $ids) { ... on Track { stream { flac high mid } } } }"
-        let data = try await request(query, operation: "getStream", variables: ["ids": [trackID]])
-        let rows = data["mediaContents"] as? [[String: Any]] ?? []
-        let stream = rows.first?["stream"] as? [String: Any]
-        for key in ["flac", "high", "mid"] { if let value = stream?[key] as? String, let url = URL(string: value) { return url } }
-        throw APIError.graphql("Для трека нет доступного потока")
+struct SearchRow: View {
+    let item: SearchItem
+    var body: some View {
+        HStack(spacing: 12) {
+            ArtworkView(url: artwork).frame(width: 54, height: 54)
+            VStack(alignment: .leading, spacing: 4) { Text(item.title).lineLimit(1); Text(item.subtitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(1) }
+            Spacer(); if case .track = item { Image(systemName: "play.circle").foregroundStyle(.orange) }
+        }.contentShape(Rectangle())
     }
+    private var artwork: URL? { switch item { case .track(let x): x.artworkURL; case .artist(let x): x.image?.src.flatMap(URL.init(string:)); case .release(let x): x.image?.src.flatMap(URL.init(string:)); case .playlist(let x): x.image?.src.flatMap(URL.init(string:)) } }
+}
 
-    func toggleFavorite(trackID: String, add: Bool) async throws {
-        let name = add ? "addItemToCollection" : "removeItemFromCollection"
-        let mutation = add ? "mutation addItemToCollection($id: ID!, $type: CollectionItemType!) { collection { addItem(id: $id, type: $type) } }" : "mutation removeItemFromCollection($id: ID!, $type: CollectionItemType!) { collection { removeItem(id: $id, type: $type) } }"
-        _ = try await request(mutation, operation: name, variables: ["id": trackID, "type": "TRACK"])
-    }
+struct ArtworkView: View {
+    let url: URL?
+    var body: some View { AsyncImage(url: url) { image in image.resizable().scaledToFill() } placeholder: { Image(systemName: "music.note").font(.title2).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity).background(.quaternary) }.clipShape(RoundedRectangle(cornerRadius: 8)) }
+}
 
-    func libraryTracks() async throws -> [Track] {
-        let idsQuery = "query userTracks($orderBy: TrackOrderByType, $orderDirection: OrderDirectionType) { collection { tracks(orderBy: $orderBy, orderDirection: $orderDirection) { id } } }"
-        let idsData = try await request(idsQuery, operation: "userTracks", variables: ["orderBy": "dateAdded", "orderDirection": "desc"])
-        let ids = (((idsData["collection"] as? [String: Any])?["tracks"] as? [[String: Any]]) ?? []).compactMap { $0["id"] as? String }
-        guard !ids.isEmpty else { return [] }
-        let query = "query getTracks($ids: [ID!]!) { getTracks(ids: $ids) { id title duration artists { id title image { src } } release { id title date image { src } artists { id title image { src } } } } }"
-        let data = try await request(query, operation: "getTracks", variables: ["ids": Array(ids.prefix(100))])
-        let rows = data["getTracks"] as? [[String: Any]] ?? []
-        return try rows.map { try JSONDecoder().decode(Track.self, from: JSONSerialization.data(withJSONObject: $0)) }
+struct LibraryView: View {
+    @EnvironmentObject private var player: PlayerStore
+    @State private var tracks: [Track] = []
+    @State private var playlists: [Playlist] = []
+    @State private var loading = false
+    @State private var error: String?
+    @State private var newPlaylistName = ""
+    @State private var showingCreate = false
+    var body: some View {
+        NavigationStack {
+            List {
+                if loading { ProgressView().frame(maxWidth: .infinity) }
+                if let error { Text(error).foregroundStyle(.red) }
+                Section("Мои плейлисты") {
+                    ForEach(playlists) { playlist in SearchRow(item: .playlist(playlist)) }
+                    Button { showingCreate = true } label: { Label("Создать плейлист", systemImage: "plus") }
+                }
+                Section("Любимые треки") {
+                    ForEach(tracks) { track in Button { Task { await player.play(track, in: tracks) } } label: { SearchRow(item: .track(track)) }.buttonStyle(.plain) }
+                }
+            }.navigationTitle("Медиатека").refreshable { await load() }.task { await load() }
+                .alert("Новый плейлист", isPresented: $showingCreate) { TextField("Название", text: $newPlaylistName); Button("Создать") { Task { await createPlaylist() } }; Button("Отмена", role: .cancel) {} }
+        }
     }
+    private func load() async { loading = true; error = nil; do { async let t = ZvukAPI.shared.libraryTracks(); async let p = ZvukAPI.shared.playlists(); tracks = try await t; playlists = try await p } catch { self.error = error.localizedDescription }; loading = false }
+    private func createPlaylist() async { guard !newPlaylistName.trimmingCharacters(in: .whitespaces).isEmpty else { return }; do { try await ZvukAPI.shared.createPlaylist(name: newPlaylistName); newPlaylistName = ""; await load() } catch { self.error = error.localizedDescription } }
+}
 
-    func playlists() async throws -> [Playlist] {
-        let idsQuery = "query userPlaylists { collection { playlists { id } } }"
-        let idsData = try await request(idsQuery, operation: "userPlaylists")
-        let ids = (((idsData["collection"] as? [String: Any])?["playlists"] as? [[String: Any]]) ?? []).compactMap { $0["id"] as? String }
-        guard !ids.isEmpty else { return [] }
-        let query = "query getPlaylists($ids: [ID!]!) { getPlaylists(ids: $ids) { id title description duration image { src } } }"
-        let data = try await request(query, operation: "getPlaylists", variables: ["ids": ids])
-        let rows = data["getPlaylists"] as? [[String: Any]] ?? []
-        return try rows.map { try JSONDecoder().decode(Playlist.self, from: JSONSerialization.data(withJSONObject: $0)) }
+struct SettingsView: View {
+    @EnvironmentObject private var session: SessionStore
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Аккаунт") {
+                    Text("Токен хранится в Keychain устройства").font(.footnote)
+                    Button("Выйти", role: .destructive) { session.signOut() }
+                }
+                Section("О приложении") {
+                    Text("Неофициальный клиент для сервиса Звук.").font(.footnote)
+                }
+            }
+            .navigationTitle("Настройки")
+        }
     }
+}
 
-    func createPlaylist(name: String) async throws {
-        let mutation = "mutation createPlayList($name: String!, $items: [PlaylistItem!]!) { playlist { create(items: $items, name: $name) } }"
-        _ = try await request(mutation, operation: "createPlayList", variables: ["name": name, "items": []])
+struct MiniPlayer: View {
+    @EnvironmentObject private var player: PlayerStore
+    @State private var showingPlayer = false
+    var body: some View { if let track = player.current { VStack(spacing: 3) { ProgressView(value: player.progress, total: max(player.duration, 1)).tint(.orange); HStack { Button { showingPlayer = true } label: { HStack { ArtworkView(url: track.artworkURL).frame(width: 40, height: 40); VStack(alignment: .leading) { Text(track.title).lineLimit(1); Text(track.artistText).font(.caption).foregroundStyle(.secondary).lineLimit(1) } }.contentShape(Rectangle()) }.buttonStyle(.plain); Spacer(); Button { Task { await player.previous() } } label: { Image(systemName: "backward.fill") }.buttonStyle(.plain); Button { player.toggle() } label: { Image(systemName: player.isPlaying ? "pause.fill" : "play.fill").font(.title2) }.buttonStyle(.plain); Button { Task { await player.next() } } label: { Image(systemName: "forward.fill") }.buttonStyle(.plain) }.padding(.horizontal).padding(.bottom, 4) }.background(.bar).fullScreenCover(isPresented: $showingPlayer) { NowPlayingView() } } }
+}
+
+struct NowPlayingView: View {
+    @EnvironmentObject private var player: PlayerStore
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack { VStack(spacing: 28) { if let track = player.current { ArtworkView(url: track.artworkURL).frame(width: 280, height: 280); VStack(spacing: 6) { Text(track.title).font(.title2.bold()).multilineTextAlignment(.center); Text(track.artistText).foregroundStyle(.secondary) }; Slider(value: Binding(get: { player.progress }, set: { player.progress = $0 }), in: 0...max(player.duration, 1), onEditingChanged: { editing in if !editing { player.seek(player.progress) } }); HStack { Text(time(player.progress)); Spacer(); Text(time(player.duration)) }.font(.caption.monospacedDigit()).foregroundStyle(.secondary); HStack(spacing: 36) { Button { Task { await player.previous() } } label: { Image(systemName: "backward.fill").font(.title) }; Button { player.skip(by: -15) } label: { Image(systemName: "gobackward.15").font(.title) }; Button { player.toggle() } label: { Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill").font(.system(size: 64)) }; Button { player.skip(by: 15) } label: { Image(systemName: "goforward.15").font(.title) }; Button { Task { await player.next() } } label: { Image(systemName: "forward.fill").font(.title) } } } else { ContentUnavailableView("Ничего не играет", systemImage: "music.note") }; Spacer() }.padding().navigationTitle("Сейчас играет").toolbar { Button("Готово") { dismiss() } } }
     }
+    private func time(_ seconds: Double) -> String { String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60) }
 }
