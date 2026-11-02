@@ -8,15 +8,24 @@ enum APIError: LocalizedError {
 actor ZvukAPI {
     static let shared = ZvukAPI()
     private let endpoint = URL(string: "https://zvuk.com/api/v1/graphql")!
+    private let profileEndpoint = URL(string: "https://zvuk.com/api/tiny/profile")!
     private var token: String?
     func configure(token: String?) { self.token = token }
+
+    private func applyHeaders(to request: inout URLRequest) {
+        request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
+        request.setValue("ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7", forHTTPHeaderField: "Accept-Language")
+        request.setValue("https://zvuk.com/", forHTTPHeaderField: "Referer")
+        request.setValue("https://zvuk.com", forHTTPHeaderField: "Origin")
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+        if let token { request.setValue(token, forHTTPHeaderField: "X-Auth-Token") }
+    }
 
     private func request(_ query: String, operation: String, variables: [String: Any] = [:]) async throws -> [String: Any] {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("ZvukMusicIOS/1.0", forHTTPHeaderField: "User-Agent")
-        if let token { request.setValue(token, forHTTPHeaderField: "X-Auth-Token") }
+        applyHeaders(to: &request)
         request.httpBody = try JSONSerialization.data(withJSONObject: ["operationName": operation, "query": query, "variables": variables])
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode,
@@ -28,11 +37,20 @@ actor ZvukAPI {
 
     func verifyToken(_ value: String) async throws {
         configure(token: value)
-        _ = try await request("query profile { profile { id name } }", operation: "profile")
+        var request = URLRequest(url: profileEndpoint)
+        request.httpMethod = "GET"
+        applyHeaders(to: &request)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode,
+              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              root["result"] != nil else {
+            configure(token: nil)
+            throw APIError.graphql("Не удалось проверить токен. Откройте zvuk.com/api/tiny/profile в браузере и скопируйте значение поля token.")
+        }
     }
 
     func quickSearch(_ text: String) async throws -> [SearchItem] {
-        let query = "query quickSearch(($query: String!, $limit: Int!) { quickSearch(query: $query, limit: $limit) { content { __typename ... on Track { id title duration artists { id title image { src } } release { id title date image { src } artists { id title image { src } } } } ... on Artist { id title image { src } } ... on Release { id title date image { src } artists { id title image { src } } } ... on Playlist { id title description duration image { src } } } } }"
+        let query = "query quickSearch($query: String!, $limit: Int!) { quickSearch(query: $query, limit: $limit) { content { __typename ... on Track { id title duration artists { id title image { src } } release { id title date image { src } artists { id title image { src } } } } ... on Artist { id title image { src } } ... on Release { id title date image { src } artists { id title image { src } } } ... on Playlist { id title description duration image { src } } } } }"
         let data = try await request(query, operation: "quickSearch", variables: ["query": text, "limit": 30])
         let content = ((data["quickSearch"] as? [String: Any])?["content"] as? [[String: Any]]) ?? []
         return try content.compactMap { raw in
